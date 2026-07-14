@@ -11,6 +11,15 @@
           "Microsoft.IdentityModel.JsonWebTokens": "8.14.0"
         }
       },
+      "AWSSDK.EC2": {
+        "type": "Direct",
+        "requested": "[4.0.1, )",
+        "resolved": "4.0.1",
+        "contentHash": "jGWSUxl9+6dxIKr/6QSm1nKeEQL1l/UlTiULta31ZidtwN6BL4CCU/mQObJqQ4GQAFeaBLarwYbI47AQ9tfWcw==",
+        "dependencies": {
+          "AWSSDK.Core": "[4.0.0.2, 5.0.0)"
+        }
+      },
       "FluentValidation": {
         "type": "Direct",
         "requested": "[12.0.0, )",
@@ -86,13 +95,14 @@
           "Npgsql": "10.0.3"
         }
       },
-      "OpenTelemetry.Exporter.Console": {
+      "Npgsql.OpenTelemetry": {
         "type": "Direct",
-        "requested": "[1.16.0, )",
-        "resolved": "1.16.0",
-        "contentHash": "cv3pKEn3KyJUNz9o8kvu5UN0NJEUoNSo5hJR4rgbfvqM6oA3moj+tkpbbQrE3bDvetBvYBes17ZxQxBBTvnJ+w==",
+        "requested": "[10.0.3, )",
+        "resolved": "10.0.3",
+        "contentHash": "ShsdG/FHxJ2VuWM6tebJL/mCWkcxymmvtENN59c85EsJdT4TStWwwtgZoBu/9UvC0qi1jpFZ6bOfl9ijiWD+vA==",
         "dependencies": {
-          "OpenTelemetry": "1.16.0"
+          "Npgsql": "10.0.3",
+          "OpenTelemetry.API": "1.15.3"
         }
       },
       "OpenTelemetry.Exporter.OpenTelemetryProtocol": {
@@ -118,6 +128,15 @@
         "requested": "[1.16.0, )",
         "resolved": "1.16.0",
         "contentHash": "vSC5EsmBVNcqXMh9BGkkq8zkoUjrg8ghBDb9zbKR8Bqjd05utjVgVft+fqsqQVsvlV5olGj1pBliHBngcIGSIg==",
+        "dependencies": {
+          "OpenTelemetry.Api.ProviderBuilderExtensions": "[1.16.0, 2.0.0)"
+        }
+      },
+      "OpenTelemetry.Instrumentation.Http": {
+        "type": "Direct",
+        "requested": "[1.16.0, )",
+        "resolved": "1.16.0",
+        "contentHash": "+Sz3lfvMXwWE8s/sMruHCDlO/+cArFVc6oBg1tCb70BKlL9FCC7uK4Ar2/VP9Hhwvs+UwaW1vGzE/uiByVHXiA==",
         "dependencies": {
           "OpenTelemetry.Api.ProviderBuilderExtensions": "[1.16.0, 2.0.0)"
         }
@@ -157,6 +176,11 @@
           "Swashbuckle.AspNetCore.SwaggerGen": "9.0.6",
           "Swashbuckle.AspNetCore.SwaggerUI": "9.0.6"
         }
+      },
+      "AWSSDK.Core": {
+        "type": "Transitive",
+        "resolved": "4.0.0.2",
+        "contentHash": "vXDAkmIB8xMmtnWubDq/uZhpfTXKAHicnTQTJBjkjNvom7eaHf5r0OB3Be+cXzzcQl4O1UOOAYHyN436JSCUlA=="
       },
       "Azure.Core": {
         "type": "Transitive",

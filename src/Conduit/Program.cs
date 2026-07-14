@@ -1,6 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
+using Amazon;
+using Amazon.EC2;
+using Amazon.EC2.Model;
+using Amazon.Util;
 using Conduit;
 using Conduit.Infrastructure;
 using Conduit.Infrastructure.Errors;
@@ -11,7 +16,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.OpenApi.Models;
-using OpenTelemetry.Exporter;
+using Npgsql;
+using OpenTelemetry;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
@@ -37,7 +43,8 @@ builder.Services.AddDbContext<ConduitContext>(options =>
     if (databaseProvider.Equals("postgres", StringComparison.OrdinalIgnoreCase) || databaseProvider.Equals("postgresql", StringComparison.OrdinalIgnoreCase))
     {
         options.UseNpgsql(connectionString);
-    }else
+    }
+    else
     if (databaseProvider.ToLowerInvariant().Trim().Equals("sqlite", StringComparison.Ordinal))
     {
         options.UseSqlite(connectionString);
@@ -57,42 +64,71 @@ builder.Services.AddDbContext<ConduitContext>(options =>
     }
 });
 
-//This is only code which trace the application excuetion.... 
+var otlpEndpoint = Environment.GetEnvironmentVariable("OTEL_EXPORTER_OTLP_ENDPOINT") ?? "http://localhost:4317";
+var deploymentEnvironment = Environment.GetEnvironmentVariable("DEPLOYMENT_ENVIRONMENT") ?? "development";
+
+var ec2Attributes = GetEc2Attributes();
+
+var awsRegion = configuration["AWS:Region"] ?? "us-east-1";
+var rdsInstanceId = configuration["AWS:RDS:InstanceId"] ?? "";
+var rdsAccountId = ec2Attributes.TryGetValue("cloud.account_id", out var acctId) ? acctId?.ToString() : "";
+var rdsArn = !string.IsNullOrEmpty(rdsInstanceId) && !string.IsNullOrEmpty(rdsAccountId?.ToString())
+    ? $"arn:aws:rds:{awsRegion}:{rdsAccountId}:db:{rdsInstanceId}"
+    : "";
+
+var rdsAttributes = new Dictionary<string, object>();
+if (!string.IsNullOrEmpty(rdsInstanceId))
+{
+    rdsAttributes["aws.rds.instance.id"] = rdsInstanceId;
+    rdsAttributes["aws.rds.instance.class"] = configuration["AWS:RDS:InstanceClass"] ?? "";
+    rdsAttributes["aws.region"] = awsRegion;
+    rdsAttributes["aws.rds.engine"] = configuration["AWS:RDS:Engine"] ?? "";
+    rdsAttributes["aws.rds.deployment.option"] = configuration["AWS:RDS:DeploymentOption"] ?? "";
+    rdsAttributes["aws.rds.storage.type"] = configuration["AWS:RDS:StorageType"] ?? "";
+    rdsAttributes["aws.rds.license.model"] = configuration["AWS:RDS:LicenseModel"] ?? "";
+    rdsAttributes["cloud.platform"] = "aws_rds";
+    rdsAttributes["db.system"] = "postgresql";
+    if (!string.IsNullOrEmpty(rdsArn))
+    {
+        rdsAttributes["cloud.resource_id"] = rdsArn;
+    }
+}
+
 builder.Services.AddOpenTelemetry()
     .ConfigureResource(resource => resource
-        .AddService("ConduitAPI", serviceVersion: "1.0.0"))
+        .AddService("realworld-demo", serviceVersion: "1.0.0")
+        .AddAttributes(new Dictionary<string, object>
+        {
+            ["deployment.environment"] = deploymentEnvironment
+        })
+        .AddAttributes(ec2Attributes))
     .WithTracing(tracing => tracing
         .AddAspNetCoreInstrumentation(options =>
         {
-            options.EnrichWithHttpRequest = (activity, request) =>
+            options.EnrichWithHttpRequest = (activity, _) =>
             {
-                activity.SetTag("aws.ec2.instance_id", configuration["AWS:Instance:Id"]);
-                activity.SetTag("aws.ec2.instance_type", configuration["AWS:Instance:Type"]);
-                activity.SetTag("aws.ec2.license_model", configuration["AWS:Instance:LicenseModel"]);
-                activity.SetTag("aws.ec2.operating_system", configuration["AWS:Instance:OperatingSystem"]);
-                activity.SetTag("aws.ec2.tenancy", configuration["AWS:Instance:Tenancy"]);
-                activity.SetTag("aws.ec2.deployment.option", configuration["AWS:Instance:DeploymentOption"]);
-
-                // RDS Metadata
-                activity.SetTag("aws.rds.engine", configuration["AWS:RDS:Engine"]);
-                activity.SetTag("aws.rds.engine_version", configuration["AWS:RDS:EngineVersion"]);
-                activity.SetTag("aws.rds.instance.class", configuration["AWS:RDS:InstanceClass"]);
-                activity.SetTag("aws.rds.instance.id", configuration["AWS:RDS:InstanceId"]);
-                activity.SetTag("aws.rds.license.model", configuration["AWS:RDS:LicenseModel"]);
-                activity.SetTag("aws.rds.storage.type", configuration["AWS:RDS:StorageType"]);
-
-                // Region and Cost
-                activity.SetTag("aws.region", configuration["AWS:Region"]);
-                activity.SetTag("cost.estimate_usd", configuration["Cost:EstimateUSD"]);
+                foreach (var attr in ec2Attributes)
+                {
+                    activity.SetTag(attr.Key, attr.Value);
+                }
             };
         })
+        .AddHttpClientInstrumentation(options =>
+        {
+            options.EnrichWithHttpRequestMessage = (activity, _) =>
+            {
+                foreach (var attr in ec2Attributes)
+                {
+                    activity.SetTag(attr.Key, attr.Value);
+                }
+            };
+        })
+        .AddNpgsql()
+        .AddProcessor(new RdsSpanEnrichmentProcessor(rdsAttributes))
         .AddOtlpExporter(options =>
         {
-            options.Endpoint = new Uri("https://otel.beakpointinsights.com/api/traces");
-            options.Headers = $"x-bkpt-key={Environment.GetEnvironmentVariable("BREAKPOINT_API_KEY")}";
-            options.Protocol = OtlpExportProtocol.HttpProtobuf;
-        })
-        .AddConsoleExporter());
+            options.Endpoint = new Uri(otlpEndpoint);
+        }));
 
 
 
@@ -191,3 +227,90 @@ using (var scope = app.Services.CreateScope())
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 
 app.Run();
+
+static Dictionary<string, object> GetEc2Attributes()
+{
+    try
+    {
+        var instanceId = EC2InstanceMetadata.InstanceId;
+        if (string.IsNullOrEmpty(instanceId))
+        {
+            return new Dictionary<string, object>();
+        }
+
+        var regionName = EC2InstanceMetadata.AvailabilityZone[..^1];
+        var region = RegionEndpoint.GetBySystemName(regionName);
+        var client = new AmazonEC2Client(region);
+
+        var response = client.DescribeInstancesAsync(
+            new DescribeInstancesRequest { InstanceIds = [instanceId] }).GetAwaiter().GetResult();
+
+        var instance = response.Reservations.First().Instances.First();
+
+        var ownerId = response.Reservations.First().OwnerId;
+
+        var attributes = new Dictionary<string, object>
+        {
+            ["cloud.platform"] = "aws_ec2",
+            ["cloud.account_id"] = ownerId,
+            ["host.id"] = instance.InstanceId,
+            ["host.type"] = instance.InstanceType.Value,
+            ["cloud.region"] = regionName,
+            ["os.type"] = instance.PlatformDetails.Contains("Windows", StringComparison.OrdinalIgnoreCase)
+                ? "windows" : "linux",
+            ["aws.ec2.license_model"] = instance.Licenses is null || instance.Licenses.Count == 0
+                ? "No License required" : "Bring your own license",
+            ["aws.ec2.tenancy"] = instance.Placement.Tenancy.Value
+        };
+
+        if (instance.PlatformDetails != "Linux/UNIX" && instance.PlatformDetails != "Windows")
+        {
+            attributes["aws.ec2.platform_details"] = instance.PlatformDetails;
+        }
+
+        if (instance.InstanceLifecycle is not null)
+        {
+            attributes["aws.ec2.instance_lifecycle"] = instance.InstanceLifecycle.Value;
+        }
+
+        if (instance.CapacityReservationId is not null)
+        {
+            attributes["aws.ec2.capacity_reservation_id"] = instance.CapacityReservationId;
+        }
+
+        return attributes;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Warning: Could not fetch EC2 metadata: {ex.Message}");
+        return new Dictionary<string, object>();
+    }
+}
+
+internal sealed partial class RdsSpanEnrichmentProcessor(Dictionary<string, object> rdsAttributes)
+    : BaseProcessor<Activity>
+{
+    public override void OnEnd(Activity activity)
+    {
+        if (rdsAttributes.Count == 0)
+        {
+            return;
+        }
+
+        if (!IsNpgsqlSpan(activity))
+        {
+            return;
+        }
+
+        foreach (var attr in rdsAttributes)
+        {
+            activity.SetTag(attr.Key, attr.Value);
+        }
+    }
+
+    private static bool IsNpgsqlSpan(Activity activity)
+    {
+        return activity.Source.Name == "Npgsql" ||
+               activity.OperationName.StartsWith("Npgsql", StringComparison.Ordinal);
+    }
+}
